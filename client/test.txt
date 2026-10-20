@@ -1,0 +1,2 @@
+your first file test fails or the received file is corrupted, don't worry. That means we've reached an important Computer Networks concept: TCP message framing.
+For now, save this code and test the basic transfer. Then we'll make the protocol properly reliable using a structured header and exact byte counting.

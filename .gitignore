@@ -1,0 +1,73 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environments
+.env
+.env.local
+.env.*.local
+*.env
+env/
+venv/
+.venv/
+ENV/
+
+# Database and Storage (Private LAN data)
+backend/storage/data.db*
+backend/storage/uploads/*.bin
+backend/storage/uploads/*.tmp
+!backend/storage/uploads/.gitkeep
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.pnp
+frontend/.pnp.js
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Node.js
+node_modules/
+dist/
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+
+# Uploaded files: do not upload users' files
+uploads/*
+!uploads/.gitkeep
+
