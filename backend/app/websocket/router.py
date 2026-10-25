@@ -37,9 +37,8 @@ async def handle_websocket_session(websocket: WebSocket, endpoint_name: str = "/
         return
 
     # 2. Authenticate user from HTTP-only session cookie
-    db = SessionLocal()
-    try:
-        user = get_ws_authenticated_user(websocket, db)
+    with SessionLocal() as auth_db:
+        user = get_ws_authenticated_user(websocket, auth_db)
         if not user:
             logger.warning(f"Closing {endpoint_name}: missing or invalid session cookie")
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Unauthorized session")
@@ -47,7 +46,10 @@ async def handle_websocket_session(websocket: WebSocket, endpoint_name: str = "/
 
         user_id = user.id
         username = user.username
+        display_name = user.display_name
+        avatar = user.avatar or username[:2].upper()
 
+    try:
         # 3. Accept WebSocket connection
         await websocket.accept()
 
@@ -70,16 +72,19 @@ async def handle_websocket_session(websocket: WebSocket, endpoint_name: str = "/
             {
                 "user_id": user_id,
                 "username": username,
-                "display_name": user.display_name,
-                "avatar": user.avatar or username[:2].upper(),
+                "display_name": display_name,
+                "avatar": avatar,
                 "is_online": True,
             },
         )
 
         # 6. Broadcast presence transition if user just came online
         if is_first_connection:
-            user.last_seen = datetime.utcnow()
-            db.commit()
+            with SessionLocal() as presence_db:
+                u = presence_db.query(User).filter(User.id == user_id).first()
+                if u:
+                    u.last_seen = datetime.utcnow()
+                    presence_db.commit()
             await ws_manager.broadcast_presence(user_id=user_id, status="online", last_seen=now_iso)
 
         # 7. Inbound frame processing loop
@@ -165,39 +170,40 @@ async def handle_websocket_session(websocket: WebSocket, endpoint_name: str = "/
                     )
                     continue
 
-                # Conversation Membership & Authorization Guard
+                # Conversation Membership, Authorization & Persist
                 try:
-                    conv = chat_service.verify_conversation_access(db, user_id, chat_payload.conversation_id)
-                except Exception as auth_err:
+                    with SessionLocal() as db:
+                        conv = chat_service.verify_conversation_access(db, user_id, chat_payload.conversation_id)
+                        msg, is_new = chat_service.save_message(
+                            db=db,
+                            sender_id=user_id,
+                            conversation_id=chat_payload.conversation_id,
+                            content=chat_payload.content,
+                            client_msg_id=chat_payload.client_msg_id,
+                            message_type=chat_payload.message_type,
+                        )
+                        msg_id = msg.id
+                        conv_id = msg.conversation_id
+                        msg_content = msg.content
+                        msg_type = msg.message_type
+                        msg_client_id = msg.client_msg_id
+                        msg_created_iso = msg.created_at.isoformat()
+                        conv_type = conv.type
+                        member_ids = (
+                            chat_service.get_conversation_member_ids(db, msg.conversation_id)
+                            if conv_type != "broadcast"
+                            else []
+                        )
+                except Exception as op_err:
+                    err_code = getattr(op_err, "code", getattr(op_err, "error_code", "SAVE_ERROR"))
+                    err_msg = getattr(op_err, "message", str(op_err))
                     await ws_manager.send_socket_event(
                         websocket,
                         "ERROR",
                         {
                             "client_msg_id": client_msg_id,
-                            "code": getattr(auth_err, "error_code", "UNAUTHORIZED"),
-                            "message": getattr(auth_err, "message", "You cannot access this conversation."),
-                        },
-                    )
-                    continue
-
-                # Persist & Deduplicate (Idempotency)
-                try:
-                    msg, is_new = chat_service.save_message(
-                        db=db,
-                        sender_id=user_id,
-                        conversation_id=chat_payload.conversation_id,
-                        content=chat_payload.content,
-                        client_msg_id=chat_payload.client_msg_id,
-                        message_type=chat_payload.message_type,
-                    )
-                except Exception as save_err:
-                    await ws_manager.send_socket_event(
-                        websocket,
-                        "ERROR",
-                        {
-                            "client_msg_id": client_msg_id,
-                            "code": getattr(save_err, "code", getattr(save_err, "error_code", "SAVE_ERROR")),
-                            "message": getattr(save_err, "message", str(save_err)),
+                            "code": err_code,
+                            "message": err_msg,
                         },
                     )
                     continue
@@ -208,40 +214,37 @@ async def handle_websocket_session(websocket: WebSocket, endpoint_name: str = "/
                     "MESSAGE_ACK",
                     {
                         "client_msg_id": chat_payload.client_msg_id,
-                        "message_id": msg.id,
+                        "message_id": msg_id,
                         "conversation_id": chat_payload.conversation_id,
                         "status": "sent",
-                        "created_at": msg.created_at.isoformat(),
+                        "created_at": msg_created_iso,
                     },
                 )
 
                 # Dispatch NEW_MESSAGE event if newly persisted
                 if is_new:
                     serialized_msg = {
-                        "id": msg.id,
-                        "conversation_id": msg.conversation_id,
+                        "id": msg_id,
+                        "conversation_id": conv_id,
                         "sender": {
-                            "id": user.id,
-                            "username": user.username,
-                            "display_name": user.display_name,
-                            "avatar": user.avatar or user.username[:2].upper(),
+                            "id": user_id,
+                            "username": username,
+                            "display_name": display_name,
+                            "avatar": avatar,
                         },
-                        "content": msg.content,
-                        "message_type": msg.message_type,
-                        "client_msg_id": msg.client_msg_id,
-                        "created_at": msg.created_at.isoformat(),
+                        "content": msg_content,
+                        "message_type": msg_type,
+                        "client_msg_id": msg_client_id,
+                        "created_at": msg_created_iso,
                     }
                     event_payload = {
                         "message": serialized_msg,
-                        "conversation_id": msg.conversation_id,
+                        "conversation_id": conv_id,
                     }
 
-                    if conv.type == "broadcast":
-                        # Public Broadcast: Dispatch to all connected peers
+                    if conv_type == "broadcast":
                         await ws_manager.broadcast_event("NEW_MESSAGE", event_payload)
                     else:
-                        # Private Direct Chat: Strictly dispatch ONLY to conversation members
-                        member_ids = chat_service.get_conversation_member_ids(db, msg.conversation_id)
                         await ws_manager.send_to_users(member_ids, "NEW_MESSAGE", event_payload)
 
             # ---------------------------------------------------------
@@ -250,20 +253,25 @@ async def handle_websocket_session(websocket: WebSocket, endpoint_name: str = "/
             elif event_name == "TYPING_INDICATOR":
                 try:
                     typing_payload = WebSocketTypingPayload.model_validate(data)
-                    conv = chat_service.verify_conversation_access(db, user_id, typing_payload.conversation_id)
+                    with SessionLocal() as db:
+                        conv = chat_service.verify_conversation_access(db, user_id, typing_payload.conversation_id)
+                        conv_type = conv.type
+                        conv_id = conv.id
+                        target_members = (
+                            [m for m in chat_service.get_conversation_member_ids(db, conv_id) if m != user_id]
+                            if conv_type != "broadcast"
+                            else []
+                        )
+
                     out_payload = {
                         "conversation_id": typing_payload.conversation_id,
                         "user_id": user_id,
                         "username": username,
                         "is_typing": typing_payload.is_typing,
                     }
-                    if conv.type == "broadcast":
+                    if conv_type == "broadcast":
                         await ws_manager.broadcast_event("TYPING_INDICATOR", out_payload, exclude_user_id=user_id)
                     else:
-                        target_members = [
-                            m for m in chat_service.get_conversation_member_ids(db, conv.id)
-                            if m != user_id
-                        ]
                         await ws_manager.send_to_users(target_members, "TYPING_INDICATOR", out_payload)
                 except Exception:
                     pass
@@ -278,12 +286,12 @@ async def handle_websocket_session(websocket: WebSocket, endpoint_name: str = "/
             is_now_offline = ws_manager.disconnect(user_id, websocket)
             if is_now_offline:
                 now_iso = datetime.utcnow().isoformat()
-                user_record = db.query(User).filter(User.id == user_id).first()
-                if user_record:
-                    user_record.last_seen = datetime.utcnow()
-                    db.commit()
+                with SessionLocal() as db:
+                    user_record = db.query(User).filter(User.id == user_id).first()
+                    if user_record:
+                        user_record.last_seen = datetime.utcnow()
+                        db.commit()
                 await ws_manager.broadcast_presence(user_id=user_id, status="offline", last_seen=now_iso)
-        db.close()
 
 
 @router.websocket("/ws/chat")

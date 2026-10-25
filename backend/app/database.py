@@ -2,6 +2,7 @@ import sqlite3
 from typing import Dict, Any, Generator
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
+from sqlalchemy.pool import NullPool
 from .config import settings
 from .logging_config import logger
 
@@ -9,13 +10,13 @@ from .logging_config import logger
 db_path = settings.get_absolute_database_path()
 db_path.parent.mkdir(parents=True, exist_ok=True)
 
-# Build engine (check_same_thread=False allows FastAPI multi-threaded requests)
+# Build engine (check_same_thread=False allows FastAPI multi-threaded requests; NullPool avoids SQLite connection pool limits)
 connect_args = {"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {}
 
 engine = create_engine(
     f"sqlite:///{db_path.as_posix()}" if "sqlite" in settings.DATABASE_URL else settings.DATABASE_URL,
     connect_args=connect_args,
-    pool_pre_ping=True,
+    poolclass=NullPool,
 )
 
 
@@ -104,17 +105,21 @@ def init_db():
     logger.info("Database schema initialization complete.")
 
 
+_cached_tables = None
+
 def check_db_health() -> Dict[str, Any]:
     """Execute a lightweight probe to verify database connectivity."""
+    global _cached_tables
     try:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1;"))
-            table_names = engine.dialect.get_table_names(conn)
+            if _cached_tables is None:
+                _cached_tables = engine.dialect.get_table_names(conn)
         return {
             "status": "healthy",
             "dialect": "sqlite",
             "file": str(db_path),
-            "tables": table_names,
+            "tables": _cached_tables or [],
         }
     except Exception as e:
         logger.error(f"Database health check failed: {e}")

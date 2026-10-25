@@ -1,7 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { UploadCloud, File, X, AlertTriangle, Shield } from 'lucide-react';
+import { UploadCloud, FileText, X, AlertTriangle, Shield } from 'lucide-react';
 import { uploadFile } from '../../services/api';
 
+/**
+ * FileUploadModal — Drag-and-drop file upload dialog.
+ * All upload/download logic unchanged. Visual redesign only.
+ */
 export function FileUploadModal({
   isOpen,
   onClose,
@@ -19,32 +23,27 @@ export function FileUploadModal({
   const fileInputRef = useRef(null);
 
   useEffect(() => {
-    if (initialFile) {
+    if (isOpen && initialFile) {
       validateAndSetFile(initialFile);
     }
-  }, [initialFile]);
+  }, [isOpen, initialFile]);
 
   if (!isOpen) return null;
 
   const handleDrag = (e) => {
     e.preventDefault();
     e.stopPropagation();
-    if (e.type === 'dragenter' || e.type === 'dragover') {
-      setDragActive(true);
-    } else if (e.type === 'dragleave') {
-      setDragActive(false);
-    }
+    if (e.type === 'dragenter' || e.type === 'dragover') setDragActive(true);
+    else if (e.type === 'dragleave') setDragActive(false);
   };
 
   const validateAndSetFile = (file) => {
     setError('');
-    // Client-side empty file check
     if (file.size === 0) {
       setError('Selected file is empty (0 bytes). Please choose a valid file.');
       setSelectedFile(null);
       return;
     }
-    // Max 50 MB
     if (file.size > 50 * 1024 * 1024) {
       setError(`File size (${(file.size / (1024 * 1024)).toFixed(1)} MB) exceeds the 50 MB LAN transfer limit.`);
       setSelectedFile(null);
@@ -57,15 +56,12 @@ export function FileUploadModal({
     e.preventDefault();
     e.stopPropagation();
     setDragActive(false);
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      validateAndSetFile(e.dataTransfer.files[0]);
-    }
+    if (e.dataTransfer.files?.[0]) validateAndSetFile(e.dataTransfer.files[0]);
   };
 
   const handleFileChange = (e) => {
-    if (e.target.files && e.target.files[0]) {
-      validateAndSetFile(e.target.files[0]);
-    }
+    if (e.target.files?.[0]) validateAndSetFile(e.target.files[0]);
+    e.target.value = '';
   };
 
   const formatFileSize = (bytes) => {
@@ -77,9 +73,8 @@ export function FileUploadModal({
 
   const handleStartUpload = async () => {
     if (!selectedFile) return;
-
     if (!conversationId) {
-      setError('No active conversation target selected to receive this file.');
+      setError('No active conversation target selected.');
       return;
     }
 
@@ -95,9 +90,7 @@ export function FileUploadModal({
         onProgress: (pct) => setUploadProgress(pct),
       });
 
-      if (onUploadComplete) {
-        onUploadComplete(result);
-      }
+      onUploadComplete?.(result);
       handleReset();
     } catch (err) {
       setIsUploading(false);
@@ -111,47 +104,51 @@ export function FileUploadModal({
     setError('');
     setIsUploading(false);
     setUploadProgress(0);
+    if (fileInputRef.current) fileInputRef.current.value = '';
     onClose();
   };
 
   return (
-    <div className="modal-overlay" onClick={handleReset} role="dialog" aria-modal="true" aria-labelledby="upload-modal-title">
+    <div
+      className="modal-overlay"
+      onClick={handleReset}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="upload-modal-title"
+    >
       <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-        {/* Modal Header */}
+        {/* Header */}
         <div className="modal-header">
           <div className="modal-title-group">
-            <UploadCloud size={20} color="var(--accent-text)" />
+            <UploadCloud size={19} color="var(--accent-text)" />
             <h3 id="upload-modal-title" className="modal-title">Share File on LAN</h3>
           </div>
-          <button className="modal-close-btn" onClick={handleReset} aria-label="Close file upload dialog" disabled={isUploading}>
-            <X size={18} />
+          <button
+            className="modal-close-btn"
+            onClick={handleReset}
+            aria-label="Close file upload dialog"
+            disabled={isUploading}
+          >
+            <X size={17} />
           </button>
         </div>
 
-        {/* Modal Body */}
+        {/* Body */}
         <div className="modal-body" style={{ gap: '14px' }}>
-          <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
-            Destination: <strong style={{ color: 'var(--text-primary)' }}>{activeTargetName}</strong>
+          {/* Destination */}
+          <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+            To: <strong style={{ color: 'var(--text-primary)' }}>{activeTargetName}</strong>
           </div>
 
+          {/* Error */}
           {error && (
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              padding: '10px 14px',
-              backgroundColor: 'rgba(239, 68, 68, 0.1)',
-              border: '1px solid var(--status-offline)',
-              borderRadius: 'var(--radius-md)',
-              color: 'var(--status-offline)',
-              fontSize: '0.82rem',
-            }}>
-              <AlertTriangle size={16} />
+            <div className="upload-error-box">
+              <AlertTriangle size={15} />
               <span>{error}</span>
             </div>
           )}
 
-          {/* Drag & Drop Dropzone */}
+          {/* Dropzone */}
           <div
             className={`file-dropzone ${dragActive ? 'dragover' : ''}`}
             onDragEnter={handleDrag}
@@ -159,6 +156,10 @@ export function FileUploadModal({
             onDragOver={handleDrag}
             onDrop={handleDrop}
             onClick={() => fileInputRef.current?.click()}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') fileInputRef.current?.click(); }}
+            aria-label="Drop a file here or click to browse"
           >
             <input
               ref={fileInputRef}
@@ -166,62 +167,61 @@ export function FileUploadModal({
               style={{ display: 'none' }}
               onChange={handleFileChange}
               disabled={isUploading}
+              aria-hidden="true"
             />
-
             <div className="dropzone-icon-box">
-              <UploadCloud size={24} color="var(--accent-text)" />
+              <UploadCloud size={22} />
             </div>
-
             <div className="dropzone-title">
               Drop file here, or <span className="dropzone-browse">browse</span>
             </div>
             <div className="dropzone-subtitle">
-              Documents, images, archives • Max LAN transfer size: 50 MB
+              Documents, images, archives · Max 50 MB
             </div>
           </div>
 
-          {/* Selected File Card & Progress */}
+          {/* Selected file */}
           {selectedFile && (
             <div style={{
               display: 'flex',
               flexDirection: 'column',
               gap: '10px',
-              backgroundColor: 'var(--bg-tertiary)',
-              border: '1px solid var(--border-subtle)',
+              backgroundColor: 'var(--bg-surface)',
+              border: '1px solid var(--border-muted)',
               borderRadius: 'var(--radius-md)',
-              padding: '14px',
+              padding: '12px',
             }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
-                  <div className="file-icon-box" style={{ width: '34px', height: '34px' }}>
-                    <File size={18} />
+                  <div className="file-icon-box" style={{ width: 34, height: 34, flexShrink: 0 }}>
+                    <FileText size={16} />
                   </div>
                   <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: '0.84rem', fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <div style={{ fontSize: '0.83rem', fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {selectedFile.name}
                     </div>
-                    <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                      {formatFileSize(selectedFile.size)} • {selectedFile.type || 'Binary stream'}
+                    <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: 2 }}>
+                      {formatFileSize(selectedFile.size)} · {selectedFile.type || 'Binary'}
                     </div>
                   </div>
                 </div>
-
                 {!isUploading && (
                   <button
                     onClick={() => setSelectedFile(null)}
-                    style={{ color: 'var(--text-muted)', padding: '4px', background: 'none', border: 'none', cursor: 'pointer' }}
+                    style={{ color: 'var(--text-muted)', padding: 4, flexShrink: 0 }}
                     aria-label="Remove selected file"
                   >
-                    <X size={16} />
+                    <X size={15} />
                   </button>
                 )}
               </div>
 
+              {/* Upload progress */}
               {isUploading && (
                 <div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>
-                    <span>Streaming over LAN socket buffer...</span>
-                    <span style={{ fontWeight: 600 }}>{uploadProgress}%</span>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: 'var(--text-secondary)', marginBottom: 6 }}>
+                    <span>Streaming over LAN...</span>
+                    <span style={{ fontWeight: 700, color: 'var(--accent-text)' }}>{uploadProgress}%</span>
                   </div>
                   <div className="progress-container">
                     <div className="progress-bar" style={{ width: `${uploadProgress}%` }} />
@@ -231,6 +231,7 @@ export function FileUploadModal({
             </div>
           )}
 
+          {/* Caption input */}
           <div className="form-group">
             <label className="form-label" htmlFor="file-caption">Optional Caption</label>
             <input
@@ -244,13 +245,14 @@ export function FileUploadModal({
             />
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.74rem', color: 'var(--text-muted)' }}>
-            <Shield size={13} color="var(--accent-text)" />
-            <span>LAN Direct Stream • End-to-end payload encryption scheduled for Phase 6</span>
+          {/* Security note */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+            <Shield size={12} color="var(--accent-text)" />
+            <span>LAN direct stream · SHA-256 hash verification on delivery</span>
           </div>
         </div>
 
-        {/* Modal Footer */}
+        {/* Footer */}
         <div className="modal-footer">
           <button className="btn btn-secondary" onClick={handleReset} disabled={isUploading}>
             Cancel
@@ -260,7 +262,7 @@ export function FileUploadModal({
             onClick={handleStartUpload}
             disabled={!selectedFile || isUploading}
           >
-            {isUploading ? `Uploading (${uploadProgress}%)...` : 'Send File to LAN'}
+            {isUploading ? `Uploading ${uploadProgress}%...` : 'Send File'}
           </button>
         </div>
       </div>

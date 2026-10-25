@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 from pydantic import BaseModel, ConfigDict
 
 
@@ -39,5 +39,6 @@ class FileRecordResponse(BaseModel):
     checksum_sha256: str
     download_url: Optional[str] = None
     created_at: datetime
+    message: Optional[Any] = None
 
     model_config = ConfigDict(from_attributes=True)

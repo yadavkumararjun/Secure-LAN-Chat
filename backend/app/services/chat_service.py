@@ -1,7 +1,7 @@
 import re
 from datetime import datetime
 from typing import List, Optional, Tuple, Dict, Any
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from ..models import Conversation, ConversationMember, Message, User
 from ..errors import AppException
@@ -220,6 +220,7 @@ def get_conversation_messages(
     # Retrieve most recent messages up to limit + offset, ordered descending then reversed
     query_results = (
         db.query(Message)
+        .options(joinedload(Message.file_record), joinedload(Message.sender))
         .filter(Message.conversation_id == conversation_id)
         .order_by(Message.id.desc())
         .offset(offset)

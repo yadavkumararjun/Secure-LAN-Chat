@@ -123,12 +123,19 @@ async def save_upload_stream(
             )
 
         # Atomically promote temporary file to final isolated storage
-        temp_path.rename(final_path)
+        temp_path.replace(final_path)
 
     except Exception as e:
         # Guarantee cleanup of incomplete or abandoned temporary files on client disconnect or error
         if temp_path.exists():
             temp_path.unlink(missing_ok=True)
+        if isinstance(e, OSError) and (getattr(e, 'errno', None) == 28 or getattr(e, 'winerror', None) == 112):
+            logger.error(f"Disk full error during file upload ingest: {e}")
+            raise AppException(
+                status_code=507,
+                message="Server storage is full. Unable to save file.",
+                error_code="STORAGE_FULL",
+            )
         if not isinstance(e, AppException):
             logger.error(f"Error during file upload ingest: {e}", exc_info=True)
             raise AppException(
@@ -140,7 +147,10 @@ async def save_upload_stream(
 
     # 4. Resolve MIME type
     detected_mime, _ = mimetypes.guess_type(clean_filename)
-    mime_type = file.content_type or detected_mime or "application/octet-stream"
+    if file.content_type and file.content_type != "application/octet-stream":
+        mime_type = file.content_type
+    else:
+        mime_type = detected_mime or file.content_type or "application/octet-stream"
     checksum = hasher.hexdigest()
 
     # 5. Persist FileRecord and Message in SQLite
@@ -166,8 +176,10 @@ async def save_upload_stream(
     db.add(message)
     db.flush()
 
-    # Link file record to message
+    # Link file record to message bidirectionally
     file_record.message_id = message.id
+    file_record.message = message
+    message.file_record = file_record
     db.commit()
     db.refresh(file_record)
     db.refresh(message)

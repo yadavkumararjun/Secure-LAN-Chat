@@ -320,3 +320,172 @@ def test_interrupted_upload_temporary_file_cleanup():
     leftover_tmp = list(upload_dir.glob("*.tmp"))
     assert len(leftover_tmp) == 0
 
+
+def test_missing_or_malformed_upload_data():
+    """Verify that uploads with missing file, missing conversation_id, or invalid payload fail cleanly."""
+    with TestClient(app) as client:
+        _register_user(client, "malformed_user")
+
+        # Missing file field
+        res_no_file = client.post("/api/files/upload", data={"conversation_id": "broadcast-general"})
+        assert res_no_file.status_code == 422  # Validation error
+
+        # Missing conversation_id field
+        test_file = io.BytesIO(b"data")
+        res_no_conv = client.post("/api/files/upload", files={"file": ("test.txt", test_file, "text/plain")})
+        assert res_no_conv.status_code == 422
+
+        # Invalid conversation_id format (e.g. injection attempt with path traversal)
+        test_file.seek(0)
+        res_bad_conv = client.post(
+            "/api/files/upload",
+            files={"file": ("test.txt", test_file, "text/plain")},
+            data={"conversation_id": "../../etc/passwd"},
+        )
+        assert res_bad_conv.status_code == 400
+        assert res_bad_conv.json()["error"]["code"] == "INVALID_CONVERSATION_ID"
+
+
+def test_duplicate_filenames_do_not_overwrite():
+    """Verify that uploading two different files with the same original filename stores both independently."""
+    with TestClient(app) as client:
+        _register_user(client, "dup_user")
+        content_1 = b"First file content: revision 1"
+        content_2 = b"Second file content: completely different revision 2"
+
+        # Upload first file named 'notes.txt'
+        res1 = client.post(
+            "/api/files/upload",
+            files={"file": ("notes.txt", io.BytesIO(content_1), "text/plain")},
+            data={"conversation_id": "broadcast-general"},
+        )
+        assert res1.status_code == 201
+        file1 = res1.json()
+
+        # Upload second file with the EXACT SAME original filename 'notes.txt'
+        res2 = client.post(
+            "/api/files/upload",
+            files={"file": ("notes.txt", io.BytesIO(content_2), "text/plain")},
+            data={"conversation_id": "broadcast-general"},
+        )
+        assert res2.status_code == 201
+        file2 = res2.json()
+
+        # IDs and internal storage filenames must be strictly unique
+        assert file1["id"] != file2["id"]
+        assert file1["stored_filename"] != file2["stored_filename"]
+        assert file1["checksum_sha256"] != file2["checksum_sha256"]
+
+        # Both files can be downloaded independently and retain their respective contents
+        dl1 = client.get(f"/api/files/{file1['id']}/download")
+        dl2 = client.get(f"/api/files/{file2['id']}/download")
+        assert dl1.status_code == 200
+        assert dl2.status_code == 200
+        assert dl1.content == content_1
+        assert dl2.content == content_2
+
+
+def test_unauthorized_upload_rejected():
+    """Verify that a user cannot upload files to a private 1-to-1 conversation they are not a member of."""
+    with TestClient(app) as client_a, TestClient(app) as client_b, TestClient(app) as client_c:
+        user_a = _register_user(client_a, "alice_uploader")
+        user_b = _register_user(client_b, "bob_uploader")
+        user_c = _register_user(client_c, "charlie_intruder")
+
+        # Establish direct conversation between A and B
+        conv_res = client_a.post("/api/conversations/direct", json={"recipient_id": user_b["id"]})
+        assert conv_res.status_code == 200
+        conv_id = conv_res.json()["id"]
+
+        # Charlie (outsider) attempts to upload into A and B's private conversation
+        intruder_content = b"Malicious payload injected into another user's chat"
+        res = client_c.post(
+            "/api/files/upload",
+            files={"file": ("hack.txt", io.BytesIO(intruder_content), "text/plain")},
+            data={"conversation_id": conv_id},
+        )
+        assert res.status_code == 403
+        assert res.json()["error"]["code"] == "ACCESS_FORBIDDEN"
+
+
+def test_missing_physical_file_returns_404():
+    """Verify that if a database file record exists but the underlying binary is missing from disk, a clean 404 is returned."""
+    with TestClient(app) as client:
+        _register_user(client, "missing_test_user")
+        res = client.post(
+            "/api/files/upload",
+            files={"file": ("ephemeral.txt", io.BytesIO(b"Ephemeral data"), "text/plain")},
+            data={"conversation_id": "broadcast-general"},
+        )
+        assert res.status_code == 201
+        upload_data = res.json()
+        file_id = upload_data["id"]
+
+        # Manually delete the physical file from disk storage
+        disk_path = settings.get_absolute_upload_dir() / upload_data["stored_filename"]
+        assert disk_path.exists()
+        disk_path.unlink()
+
+        # Download should return 404 FILE_CONTENT_NOT_FOUND rather than a 500 crash
+        dl_res = client.get(f"/api/files/{file_id}/download")
+        assert dl_res.status_code == 404
+        assert dl_res.json()["error"]["code"] == "FILE_CONTENT_NOT_FOUND"
+
+
+def test_direct_conversation_file_websocket_notification():
+    """Verify that uploading a file to a 1-to-1 conversation sends real-time events to both members and NOT outsiders."""
+    with TestClient(app) as client_a, TestClient(app) as client_b, TestClient(app) as client_c:
+        user_a = _register_user(client_a, "dm_sender")
+        user_b = _register_user(client_b, "dm_recipient")
+        user_c = _register_user(client_c, "dm_outsider")
+
+        # Create direct conversation between A and B
+        conv_res = client_a.post("/api/conversations/direct", json={"recipient_id": user_b["id"]})
+        assert conv_res.status_code == 200
+        conv_id = conv_res.json()["id"]
+
+        # Connect WebSocket for User B and User C
+        with client_b.websocket_connect("/ws/chat", headers={"Origin": "http://localhost:5173"}) as ws_b, \
+             client_c.websocket_connect("/ws/chat", headers={"Origin": "http://localhost:5173"}) as ws_c:
+
+            # Drain handshakes
+            _receive_event(ws_b, "AUTH_SUCCESS")
+            _receive_event(ws_c, "AUTH_SUCCESS")
+
+            # User A uploads a private file to User B
+            file_data = b"Secret contract between A and B"
+            upload_res = client_a.post(
+                "/api/files/upload",
+                files={"file": ("contract.pdf", io.BytesIO(file_data), "application/pdf")},
+                data={"conversation_id": conv_id, "caption": "Official agreement"},
+            )
+            assert upload_res.status_code == 201
+            assert upload_res.json()["message"] is not None  # Message object returned in response
+
+            # User B receives the event with attachment details
+            event_b = _receive_event(ws_b, "NEW_MESSAGE")
+            assert event_b["data"]["conversation_id"] == conv_id
+            assert event_b["data"]["message"]["file"]["name"] == "contract.pdf"
+            assert event_b["data"]["message"]["file"]["bytes"] == len(file_data)
+
+
+def test_placeholder_conversation_upload_resolution():
+    """Verify that uploading to a placeholder 'user-{id}' conversation automatically resolves to the canonical DM."""
+    with TestClient(app) as client_a, TestClient(app) as client_b:
+        user_a = _register_user(client_a, "res_user_a")
+        user_b = _register_user(client_b, "res_user_b")
+
+        # Upload passing 'user-{id}' directly as conversation_id
+        res = client_a.post(
+            "/api/files/upload",
+            files={"file": ("direct_share.txt", io.BytesIO(b"Hello direct"), "text/plain")},
+            data={"conversation_id": f"user-{user_b['id']}"},
+        )
+        assert res.status_code == 201
+        upload_data = res.json()
+        # The conversation_id should be resolved to the canonical dm_{low}_{high} format
+        assert upload_data["conversation_id"].startswith("dm_")
+        assert str(user_a["id"]) in upload_data["conversation_id"]
+        assert str(user_b["id"]) in upload_data["conversation_id"]
+
+

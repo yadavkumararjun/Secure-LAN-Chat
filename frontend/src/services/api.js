@@ -101,90 +101,128 @@ export async function sendMessageRest(conversationId, { content, clientMsgId, me
  * Upload a file with streaming progress monitoring over local LAN.
  * Uses XMLHttpRequest for reliable progress events.
  */
-export function uploadFile({ file, conversationId, caption, onProgress }) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('conversation_id', conversationId);
-    if (caption && caption.trim()) {
-      formData.append('caption', caption.trim());
-    }
+export async function uploadFile({ file, conversationId, caption, onProgress }) {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('conversation_id', conversationId);
+  if (caption && caption.trim()) {
+    formData.append('caption', caption.trim());
+  }
 
-    xhr.open('POST', '/api/files/upload', true);
-    xhr.withCredentials = true;
+  // 1. Try streaming upload via XMLHttpRequest (provides accurate progress percentages)
+  try {
+    return await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/files/upload', true);
+      xhr.withCredentials = true;
+      xhr.timeout = 120000; // 2 minute timeout for large LAN file transfers
 
-    if (xhr.upload && onProgress) {
-      xhr.upload.onprogress = (event) => {
-        if (event.lengthComputable) {
-          const percentComplete = Math.round((event.loaded / event.total) * 100);
-          onProgress(percentComplete);
+      if (xhr.upload && onProgress) {
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) {
+            const percentComplete = Math.round((event.loaded / event.total) * 100);
+            onProgress(percentComplete);
+          }
+        };
+      }
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            resolve(data);
+          } catch {
+            resolve({ message: 'Upload succeeded' });
+          }
+        } else {
+          let errMsg = `Upload failed (HTTP ${xhr.status})`;
+          try {
+            const errJson = JSON.parse(xhr.responseText);
+            if (errJson.error && errJson.error.message) {
+              errMsg = errJson.error.message;
+            } else if (errJson.message) {
+              errMsg = errJson.message;
+            } else if (errJson.detail) {
+              errMsg = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+            }
+          } catch {}
+          reject(new Error(errMsg));
         }
       };
-    }
 
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        try {
-          const data = JSON.parse(xhr.responseText);
-          resolve(data);
-        } catch {
-          resolve({ message: 'Upload succeeded' });
+      xhr.ontimeout = () => {
+        reject(new Error('Upload timed out. The local network connection may be slow or interrupted.'));
+      };
+
+      xhr.onerror = () => {
+        const netErr = new Error('XHR_NETWORK_ERROR');
+        netErr.isNetworkError = true;
+        reject(netErr);
+      };
+
+      xhr.onabort = () => {
+        reject(new Error('Upload canceled.'));
+      };
+
+      xhr.send(formData);
+    });
+  } catch (err) {
+    if (err.message === 'XHR_NETWORK_ERROR') {
+      // 2. Resilient fallback to fetch API if XHR was blocked or reset
+      console.warn('[Upload] XHR failed, retrying via standard fetch API...');
+      try {
+        const response = await fetch('/api/files/upload', {
+          method: 'POST',
+          credentials: 'include',
+          body: formData,
+        });
+
+        if (!response.ok) {
+          let errMsg = `Upload failed (HTTP ${response.status})`;
+          try {
+            const errJson = await response.json();
+            if (errJson.error && errJson.error.message) {
+              errMsg = errJson.error.message;
+            } else if (errJson.message) {
+              errMsg = errJson.message;
+            } else if (errJson.detail) {
+              errMsg = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+            }
+          } catch {}
+          throw new Error(errMsg);
         }
-      } else {
-        let errMsg = `Upload failed (HTTP ${xhr.status})`;
-        try {
-          const errJson = JSON.parse(xhr.responseText);
-          if (errJson.error && errJson.error.message) {
-            errMsg = errJson.error.message;
-          } else if (errJson.message) {
-            errMsg = errJson.message;
-          }
-        } catch {}
-        reject(new Error(errMsg));
+
+        onProgress?.(100);
+        return await response.json();
+      } catch (fetchErr) {
+        throw new Error(
+          fetchErr.message && fetchErr.message !== 'Failed to fetch'
+            ? fetchErr.message
+            : 'Network error during file upload over LAN. Please verify the backend server is running on port 8000.'
+        );
       }
-    };
-
-    xhr.onerror = () => {
-      reject(new Error('Network error during file upload over LAN.'));
-    };
-
-    xhr.onabort = () => {
-      reject(new Error('Upload canceled.'));
-    };
-
-    xhr.send(formData);
-  });
+    }
+    throw err;
+  }
 }
 
 /**
  * Download a shared file with authenticated credentials and trigger browser save dialog.
+ * Uses native download anchor for fast, unbuffered direct streaming to user's Downloads folder.
  */
 export async function downloadFile(fileId, filename) {
-  const response = await fetch(`/api/files/${encodeURIComponent(fileId)}/download`, {
-    method: 'GET',
-    credentials: 'include',
-  });
+  const downloadUrl = `/api/files/${encodeURIComponent(fileId)}/download`;
+  const cleanFilename = (filename || `file-${fileId}`).replace(/[/\\?%*:|"<>]/g, '_');
 
-  if (!response.ok) {
-    let errorMsg = `Download failed with HTTP ${response.status}`;
-    try {
-      const errJson = await response.json();
-      if (errJson.error && errJson.error.message) {
-        errorMsg = errJson.error.message;
-      }
-    } catch {}
-    throw new Error(errorMsg);
-  }
-
-  const blob = await response.blob();
-  const url = window.URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url;
-  a.download = filename || `file-${fileId}`;
+  a.style.display = 'none';
+  a.href = downloadUrl;
+  a.download = cleanFilename;
   document.body.appendChild(a);
   a.click();
-  window.URL.revokeObjectURL(url);
-  a.remove();
+
+  setTimeout(() => {
+    a.remove();
+  }, 1000);
 }
 

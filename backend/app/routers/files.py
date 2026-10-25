@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import User, Conversation
 from ..errors import AppException
+from ..logging_config import logger
 from ..security.sessions import get_current_user
 from ..services.rate_limiter import upload_rate_limiter
 from ..websocket.manager import ws_manager
@@ -34,12 +35,27 @@ async def upload_file(
     - Creates FileRecord and linked Message in SQLite.
     - Dispatches real-time NEW_MESSAGE WebSocket event to conversation members.
     """
+    logger.info(f"Incoming file upload: '{file.filename}', conv={conversation_id}, user={current_user.username} (ID {current_user.id})")
+
     if not upload_rate_limiter.is_allowed(current_user.id):
         raise AppException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             message="Upload rate limit reached. Please wait a moment before sharing more files.",
             error_code="RATE_LIMITED",
         )
+
+    # Support placeholder 'user-{id}' conversation identifiers by automatically resolving them
+    if conversation_id.startswith("user-"):
+        try:
+            target_user_id = int(conversation_id.split("-", 1)[1])
+            dm_conv = chat_service.get_or_create_direct_conversation(db, current_user.id, target_user_id)
+            conversation_id = dm_conv.id
+        except (ValueError, IndexError):
+            raise AppException(
+                status_code=400,
+                message="Invalid conversation identifier.",
+                error_code="INVALID_CONVERSATION_ID",
+            )
 
     file_record, message = await file_service.save_upload_stream(
         file=file,
@@ -50,9 +66,10 @@ async def upload_file(
     )
 
     # Dispatch real-time WebSocket event to active conversation peers
-    serialized_msg = serialize_message(message).model_dump(mode="json")
+    serialized_msg = serialize_message(message)
+    serialized_msg_dict = serialized_msg.model_dump(mode="json")
     ws_event_payload = {
-        "message": serialized_msg,
+        "message": serialized_msg_dict,
         "conversation_id": conversation_id,
     }
 
@@ -76,6 +93,7 @@ async def upload_file(
         checksum_sha256=file_record.checksum_sha256,
         download_url=f"/api/files/{file_record.id}/download",
         created_at=file_record.created_at,
+        message=serialized_msg,
     )
 
 
@@ -97,15 +115,18 @@ def download_file(
         db=db,
     )
 
+    safe_name = file_record.original_name.replace('"', '\\"')
     encoded_filename = quote(file_record.original_name)
     headers = {
-        "Content-Disposition": f'attachment; filename="{file_record.original_name}"; filename*=UTF-8\'\'{encoded_filename}',
+        "Content-Disposition": f'attachment; filename="{safe_name}"; filename*=UTF-8\'\'{encoded_filename}',
         "X-Content-Type-Options": "nosniff",
         "X-File-Checksum-SHA256": file_record.checksum_sha256,
+        "Access-Control-Expose-Headers": "Content-Disposition, X-File-Checksum-SHA256",
     }
 
     return FileResponse(
         path=str(file_path),
+        filename=file_record.original_name,
         media_type=file_record.mime_type,
         headers=headers,
     )

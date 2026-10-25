@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { AppHeader } from './components/layout/AppHeader';
+import { NavRail } from './components/layout/NavRail';
 import { Sidebar } from './components/sidebar/Sidebar';
 import { ChatArea } from './components/chat/ChatArea';
 import { EmptyChatState } from './components/chat/EmptyChatState';
@@ -74,6 +75,9 @@ export default function App() {
   // Mobile sidebar visibility
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
 
+  // Nav rail active section
+  const [activeNav, setActiveNav] = useState('chats'); // 'chats' | 'peers'
+
   // Dialog states
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
@@ -88,6 +92,12 @@ export default function App() {
   const wsRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
   const reconnectAttemptsRef = useRef(0);
+  const activeConversationIdRef = useRef(activeConversationId);
+  const syncConversationsRef = useRef(null);
+
+  useEffect(() => {
+    activeConversationIdRef.current = activeConversationId;
+  }, [activeConversationId]);
 
   // Apply theme to document body
   useEffect(() => {
@@ -233,6 +243,7 @@ export default function App() {
   }, [isAuthenticated, currentUser]);
 
   useEffect(() => {
+    syncConversationsRef.current = syncConversations;
     if (isAuthenticated) {
       syncConversations();
     }
@@ -329,7 +340,7 @@ export default function App() {
 
             // AUTH_SUCCESS
             if (payload.event === 'AUTH_SUCCESS') {
-              syncConversations();
+              syncConversationsRef.current?.();
             }
 
             // PRESENCE_CHANGE
@@ -374,8 +385,15 @@ export default function App() {
               const mapped = mapBackendMessage(rawMsg, currentUser.id);
 
               setConversations((prev) => {
+                const isMatch = (c) => c.id === conversation_id || (c.type === 'direct' && c.id === `user-${mapped.senderId}`);
+                const hasConv = prev.some(isMatch);
+                if (!hasConv) {
+                  // Unknown conversation received over socket: refresh conversation list
+                  setTimeout(syncConversations, 100);
+                }
+
                 return prev.map((c) => {
-                  if (c.id === conversation_id) {
+                  if (isMatch(c)) {
                     const currentMsgs = c.messages || [];
                     const existsByClientMsgId = mapped.clientMsgId && currentMsgs.some((m) => m.clientMsgId === mapped.clientMsgId);
                     const existsById = currentMsgs.some((m) => m.id === mapped.id);
@@ -395,6 +413,7 @@ export default function App() {
 
                     return {
                       ...c,
+                      id: conversation_id,
                       lastActivity: mapped.timestamp,
                       unreadCount: isUnread ? (c.unreadCount || 0) + 1 : c.unreadCount,
                       messages: updatedList,
@@ -404,7 +423,7 @@ export default function App() {
                 });
               });
 
-              if (conversation_id !== activeConversationId && !mapped.isOutgoing) {
+              if (conversation_id !== activeConversationIdRef.current && !mapped.isOutgoing) {
                 addToast(`New message from ${mapped.senderName}`, 'info');
               }
             }
@@ -467,7 +486,7 @@ export default function App() {
         socket.close();
       }
     };
-  }, [isAuthenticated, currentUser?.id, activeConversationId, syncConversations]);
+  }, [isAuthenticated, currentUser?.id]);
 
   // 6. Auth Handlers
   const handleLogin = async ({ username, password }) => {
@@ -744,26 +763,52 @@ export default function App() {
   };
 
   // 11. File Transfer Handlers
-  const handleOpenUpload = (file = null) => {
+  const handleOpenUpload = async (file = null) => {
+    // If currently on an uncontacted peer placeholder (e.g. user-2), initialize direct conversation first
+    if (activeConversationId && activeConversationId.startsWith('user-')) {
+      const targetUserId = parseInt(activeConversationId.replace('user-', ''), 10);
+      try {
+        const directConv = await openDirectConversation(targetUserId);
+        setActiveConversationId(directConv.id);
+        await syncConversations();
+      } catch (err) {
+        addToast(`Could not initialize chat: ${err.message}`, 'error');
+        return;
+      }
+    }
     setPendingUploadFile(file && file instanceof File ? file : null);
     setIsUploadOpen(true);
   };
 
-  const handleDownloadFile = async (fileInfo) => {
-    if (!fileInfo || !fileInfo.id) return;
-    try {
-      addToast(`Downloading ${fileInfo.name}...`, 'info');
-      await downloadFile(fileInfo.id, fileInfo.name);
-      addToast(`Downloaded ${fileInfo.name}`, 'success');
-    } catch (err) {
-      addToast(`Download failed: ${err.message}`, 'error');
-    }
+  const handleDownloadFile = (fileInfo) => {
+    if (!fileInfo || !fileInfo.name) return;
+    addToast(`Downloading ${fileInfo.name}...`, 'info');
   };
 
   const handleUploadComplete = (result) => {
     setIsUploadOpen(false);
     setPendingUploadFile(null);
     addToast(`File shared over LAN: ${result.original_name}`, 'success');
+
+    // Immediately display the newly created file attachment in the sender's conversation
+    if (result && result.message && result.conversation_id) {
+      const mapped = mapBackendMessage(result.message, currentUser.id);
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (c.id === result.conversation_id) {
+            const currentMsgs = c.messages || [];
+            if (!currentMsgs.some((m) => m.id === mapped.id)) {
+              return {
+                ...c,
+                lastActivity: mapped.timestamp,
+                messages: [...currentMsgs, mapped],
+              };
+            }
+          }
+          return c;
+        })
+      );
+    }
   };
 
   const activeConversation = conversations.find((c) => c.id === activeConversationId);
@@ -772,10 +817,11 @@ export default function App() {
   // Loading indicator while checking session cookie
   if (isCheckingAuth) {
     return (
-      <div className="auth-page">
-        <div style={{ color: 'var(--text-secondary)', fontSize: '0.88rem' }}>
-          Checking local LAN session...
+      <div className="loading-screen">
+        <div className="loading-screen-icon">
+          <span style={{ width: 22, height: 22, border: '2px solid var(--accent-border)', borderTopColor: 'var(--accent-primary)', borderRadius: '50%', display: 'inline-block', animation: 'spin 0.75s linear infinite' }} />
         </div>
+        <span>Verifying LAN session...</span>
       </div>
     );
   }
@@ -816,6 +862,18 @@ export default function App() {
 
       {/* Main Workspace Layout */}
       <main className="workspace-layout">
+        {/* Narrow icon nav rail */}
+        <NavRail
+          activeNav={activeNav}
+          onNavChange={(nav) => {
+            setActiveNav(nav);
+            // Both 'chats' and 'peers' show the conv panel — no separate view needed
+          }}
+          currentUser={currentUser}
+          onOpenSettings={() => setIsSettingsOpen(true)}
+        />
+
+        {/* Conversations panel */}
         <Sidebar
           conversations={conversations}
           activeConversationId={activeConversationId}

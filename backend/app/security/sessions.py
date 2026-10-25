@@ -103,7 +103,7 @@ def clear_session_cookie(response: Response):
 
 
 def extract_session_token(request: Request) -> Optional[str]:
-    """Extract session token primarily from HTTP-only cookie, or fallback to Authorization header."""
+    """Extract session token primarily from HTTP-only cookie, or fallback to Authorization header or query param."""
     # 1. Primary: HTTP-only cookie
     token = request.cookies.get(settings.COOKIE_NAME)
     if token:
@@ -113,6 +113,11 @@ def extract_session_token(request: Request) -> Optional[str]:
     auth_header = request.headers.get("authorization")
     if auth_header and auth_header.lower().startswith("bearer "):
         return auth_header[7:].strip()
+
+    # 3. Tertiary fallback: Query parameter for direct downloads or media links
+    query_token = request.query_params.get("token") or request.query_params.get(settings.COOKIE_NAME)
+    if query_token:
+        return query_token
 
     return None
 

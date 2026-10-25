@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  secure-lan-chat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: secure-lan-chat
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persist SQLite database and uploaded files on the host machine
+      - ./backend/storage:/app/backend/storage
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000

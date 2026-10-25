@@ -51,6 +51,7 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
         allow_headers=["*"],
+        expose_headers=["Content-Disposition", "X-File-Checksum-SHA256"],
     )
 
     # Attach defense-in-depth HTTP security headers (nosniff, DENY, CSP)
